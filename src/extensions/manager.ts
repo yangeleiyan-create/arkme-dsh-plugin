@@ -24,6 +24,7 @@ import { verifyBundleResolutionSignature, verifyExtensionResolutionSignature } f
 export { verifyExtensionResolutionSignature } from './signature.js'
 import {
   type ArkmeExtensionCatalogItem, type ArkmeExtensionCatalogPage,
+  type ArkmeExtensionCatalogSort, type ArkmeExtensionClassificationPage, type ArkmeExtensionClassificationTree,
   type ArkmeExtensionDeleteResult, type ArkmeExtensionEnabledResult, type ArkmeExtensionEnabledState,
   ARKME_EXTENSION_ICON_MAX_BYTES, type ArkmeExtensionIconBytes, type ArkmeExtensionIconMediaType,
   type ArkmeExtensionIconResult, type ArkmeExtensionInstallPreview, type ArkmeExtensionInstallResolution,
@@ -135,7 +136,7 @@ function requireBundleUploadSlots(session: import('./types.js').ArkmeBundlePubli
   source: NonNullable<typeof session.source_upload>
 } {
   if (session.bundle_upload === undefined || session.source_upload === undefined) {
-    throw new ArkmePluginError('extension-publish-contract-invalid', '扩展市场没有返回完整的 Bundle/source 上传槽', false, 502)
+    throw new ArkmePluginError('extension-publish-contract-invalid', '市集没有返回完整的 Bundle/source 上传槽', false, 502)
   }
   return { bundle: session.bundle_upload, source: session.source_upload }
 }
@@ -261,7 +262,7 @@ function assertSharedExtensionDetail(value: unknown): ArkmeSharedExtensionDetail
 function assertPreviewGallery(value: ArkmeExtensionPreviewGallery, extensionId: string): ArkmeExtensionPreviewGallery {
   if (value.extension_id !== extensionId || !Number.isSafeInteger(value.preview_revision) || value.preview_revision < 0
     || !Array.isArray(value.preview_images) || value.preview_images.length > ARKME_EXTENSION_PREVIEW_MAX_ITEMS) {
-    throw new ArkmePluginError('extension-preview-contract-invalid', '扩展市场返回了不一致的预览图集', false, 502)
+    throw new ArkmePluginError('extension-preview-contract-invalid', '市集返回了不一致的预览图集', false, 502)
   }
   const refs = new Set<string>()
   for (const item of value.preview_images) {
@@ -270,7 +271,7 @@ function assertPreviewGallery(value: ArkmeExtensionPreviewGallery, extensionId: 
       || !Number.isSafeInteger(item.preview_size) || item.preview_size <= 0 || item.preview_size > ARKME_EXTENSION_PREVIEW_MAX_BYTES
       || !Number.isSafeInteger(item.width) || !Number.isSafeInteger(item.height)
       || item.width < 320 || item.height < 320 || item.width > 4096 || item.height > 4096) {
-      throw new ArkmePluginError('extension-preview-contract-invalid', '扩展市场返回了无效预览图元数据', false, 502)
+      throw new ArkmePluginError('extension-preview-contract-invalid', '市集返回了无效预览图元数据', false, 502)
     }
     refs.add(item.preview_ref)
   }
@@ -330,6 +331,10 @@ function atLeast(current: string, minimum: string): boolean {
   return true
 }
 
+export function extensionCatalogPageLimit(limit?: number): number {
+  return Math.min(100, Math.max(1, Math.trunc(limit ?? 20)))
+}
+
 export class ArkmeExtensionManager {
   private readonly trustedKeys: Map<string, string>
   private readonly dshRuntimeVersion: string
@@ -338,6 +343,7 @@ export class ArkmeExtensionManager {
   private enabledMutationTail: Promise<void> = Promise.resolve()
   private readonly iconCache = new Map<string, ArkmeExtensionIconBytes>()
   private readonly previewCache = new Map<string, ArkmeExtensionPreviewBytes>()
+  private readonly installationInstanceId: string
 
   constructor(
     readonly client: ExtensionPublishClient,
@@ -347,6 +353,7 @@ export class ArkmeExtensionManager {
   ) {
     this.trustedKeys = parseTrustedKeys(options.trustedSigningKeys)
     this.dshRuntimeVersion = options.dshRuntimeVersion ?? '0.1.0-rc.7'
+    this.installationInstanceId = store.installationInstanceId()
     mkdirSync(options.artifactDirectory, { recursive: true, mode: 0o700 })
     chmodSync(options.artifactDirectory, 0o700)
   }
@@ -354,6 +361,11 @@ export class ArkmeExtensionManager {
   /** Profile installation is Host-owned and does not need a live conversation Agent. */
   canInstallWithoutAgent(): boolean {
     return this.options.profileDirectory !== undefined && this.options.profileInstaller !== undefined
+  }
+
+  /** Reconcile this Profile once during Host startup; failures remain compatible with older services. */
+  async reconcileInstallationMetrics(): Promise<void> {
+    await this.syncInstallationSnapshot()
   }
 
   /** Profile-only extensions can be removed without touching a legacy dynamic Agent. */
@@ -470,18 +482,60 @@ export class ArkmeExtensionManager {
   }
 
   async search(query = '', limit = 20, signal?: AbortSignal): Promise<ArkmeExtensionCatalogPage> {
-    return await this.client.list({ query: query.trim(), limit: Math.min(50, Math.max(1, Math.trunc(limit))) }, signal)
+    return await this.searchCatalog({ query, limit }, signal)
+  }
+
+  async searchCatalog(input: {
+    query?: string
+    sort?: ArkmeExtensionCatalogSort
+    cursor?: string
+    limit?: number
+  } = {}, signal?: AbortSignal): Promise<ArkmeExtensionCatalogPage> {
+    const query = input.query?.trim() ?? ''
+    const cursor = input.cursor?.trim() ?? ''
+    return await this.client.list({
+      ...(query === '' ? {} : { query }),
+      ...(input.sort === undefined ? {} : { sort: input.sort }),
+      ...(cursor === '' ? {} : { cursor }),
+      limit: extensionCatalogPageLimit(input.limit),
+    }, signal)
+  }
+
+  async classificationTree(limit = 30, signal?: AbortSignal): Promise<ArkmeExtensionClassificationTree> {
+    return await this.client.classificationTree(Math.min(100, Math.max(1, Math.trunc(limit))), signal)
+  }
+
+  async classificationItems(input: {
+    categoryId: string
+    query?: string
+    sort?: ArkmeExtensionCatalogSort
+    cursor?: string
+    limit?: number
+  }, signal?: AbortSignal): Promise<ArkmeExtensionClassificationPage> {
+    const categoryId = requiredId(input.categoryId, 'category_id')
+    const query = input.query?.trim() ?? ''
+    const cursor = input.cursor?.trim() ?? ''
+    return await this.client.classificationItems({
+      category_id: categoryId,
+      ...(query === '' ? {} : { query }),
+      ...(input.sort === undefined ? {} : { sort: input.sort }),
+      ...(cursor === '' ? {} : { cursor }),
+      limit: extensionCatalogPageLimit(input.limit),
+    }, signal)
   }
 
   async inspect(extensionId: string, signal?: AbortSignal): Promise<ArkmeExtensionCatalogItem> {
-    return await this.client.detail(requiredId(extensionId, 'extension_id'), signal)
+    const normalizedExtensionId = requiredId(extensionId, 'extension_id')
+    const detail = await this.client.detail(normalizedExtensionId, signal)
+    void this.reportOpen(normalizedExtensionId)
+    return detail
   }
 
   async previewInstall(extensionId: string, version?: string, signal?: AbortSignal): Promise<ArkmeExtensionInstallPreview> {
     const requestedId = requiredId(extensionId, 'extension_id')
     const resolution = await this.client.resolveInstall(requestedId, version, signal)
     if (resolution.extension_id !== requestedId) {
-      throw new ArkmePluginError('extension-install-contract-invalid', '扩展市场返回了错误的扩展身份', false, 502)
+      throw new ArkmePluginError('extension-install-contract-invalid', '市集返回了错误的扩展身份', false, 502)
     }
     if (bundleInstallResolution(resolution)) {
       const bundle = resolution as BundleInstallResolution
@@ -546,7 +600,7 @@ export class ArkmeExtensionManager {
     const extension = result.extension
     if (extension.extension_id !== extensionId || extension.name !== name || extension.description !== description
       || extension.visibility !== input.visibility || !Number.isSafeInteger(extension.updated_at) || extension.updated_at! <= 0) {
-      throw new ArkmePluginError('extension-metadata-contract-invalid', '扩展市场返回了不一致的资料事实', false, 502)
+      throw new ArkmePluginError('extension-metadata-contract-invalid', '市集返回了不一致的资料事实', false, 502)
     }
     return extension
   }
@@ -563,11 +617,11 @@ export class ArkmeExtensionManager {
 		const share = await this.client.rotateShareLink(input.extensionId.trim(), input.clientMutationId, input.signal)
 		let url: URL
 		try { url = new URL(share.url) } catch (error) {
-			throw new ArkmePluginError('extension-share-contract-invalid', '扩展市场返回了无效分享链接', false, 502, { cause: error })
+			throw new ArkmePluginError('extension-share-contract-invalid', '市集返回了无效分享链接', false, 502, { cause: error })
 		}
 		if (!/^extshare_[0-9a-f]{32}$/.test(share.ref) || url.protocol !== 'https:' || !url.pathname.endsWith(`/${share.ref}`)
 			|| url.username !== '' || url.password !== '') {
-			throw new ArkmePluginError('extension-share-contract-invalid', '扩展市场返回了无效分享链接', false, 502)
+			throw new ArkmePluginError('extension-share-contract-invalid', '市集返回了无效分享链接', false, 502)
 		}
 		return share
 	}
@@ -605,7 +659,7 @@ export class ArkmeExtensionManager {
     }, input.signal)
     if (session.status === 'uploading') {
       if (session.upload_url === undefined) {
-        throw new ArkmePluginError('extension-icon-upload-contract-invalid', '扩展市场未返回头像上传地址', false, 502)
+        throw new ArkmePluginError('extension-icon-upload-contract-invalid', '市集未返回头像上传地址', false, 502)
       }
       await this.client.uploadIcon(
         session.upload_url,
@@ -617,7 +671,7 @@ export class ArkmeExtensionManager {
     }
     const result = await this.client.completeIconUploadSession(session.icon_upload_session_id, input.signal)
     if (result.extension_id !== extensionId || result.icon_sha256 !== iconSha256 || result.content_type !== input.mediaType) {
-      throw new ArkmePluginError('extension-icon-contract-invalid', '扩展市场返回了不一致的头像事实', false, 502)
+      throw new ArkmePluginError('extension-icon-contract-invalid', '市集返回了不一致的头像事实', false, 502)
     }
     // A replacement invalidates every previously authorized ref for this extension.
     // Keeping an old immutable-ref entry would let the same-origin image route serve
@@ -642,7 +696,7 @@ export class ArkmeExtensionManager {
     if (resolution.extension_id !== extensionId || resolution.icon_ref !== iconRef
       || !['image/png', 'image/jpeg', 'image/webp'].includes(resolution.content_type)
       || resolution.icon_size <= 0 || resolution.icon_size > ARKME_EXTENSION_ICON_MAX_BYTES) {
-      throw new ArkmePluginError('extension-icon-contract-invalid', '扩展市场返回了不一致的头像解析结果', false, 502)
+      throw new ArkmePluginError('extension-icon-contract-invalid', '市集返回了不一致的头像解析结果', false, 502)
     }
     const data = await this.client.downloadIcon(resolution, signal)
     const sha256 = createHash('sha256').update(data).digest('hex')
@@ -688,7 +742,7 @@ export class ArkmeExtensionManager {
     }, input.signal)
     if (session.status === 'uploading') {
       if (session.upload_url === undefined) {
-        throw new ArkmePluginError('extension-preview-upload-contract-invalid', '扩展市场未返回预览图上传地址', false, 502)
+        throw new ArkmePluginError('extension-preview-upload-contract-invalid', '市集未返回预览图上传地址', false, 502)
       }
       await this.client.uploadPreview(
         session.upload_url, input.data, input.mediaType, session.upload_headers ?? {}, input.signal,
@@ -699,7 +753,7 @@ export class ArkmeExtensionManager {
       extensionId,
     )
     if (result.applied_preview_ref !== `preview_v1_${previewSha256}`) {
-      throw new ArkmePluginError('extension-preview-contract-invalid', '扩展市场返回了不一致的预览图事实', false, 502)
+      throw new ArkmePluginError('extension-preview-contract-invalid', '市集返回了不一致的预览图事实', false, 502)
     }
     return result
   }
@@ -752,7 +806,7 @@ export class ArkmeExtensionManager {
     if (resolution.extension_id !== extensionId || resolution.preview_ref !== previewRef
       || !['image/png', 'image/jpeg', 'image/webp'].includes(resolution.content_type)
       || resolution.preview_size <= 0 || resolution.preview_size > ARKME_EXTENSION_PREVIEW_MAX_BYTES) {
-      throw new ArkmePluginError('extension-preview-contract-invalid', '扩展市场返回了不一致的预览图解析结果', false, 502)
+      throw new ArkmePluginError('extension-preview-contract-invalid', '市集返回了不一致的预览图解析结果', false, 502)
     }
     const data = await this.client.downloadPreview(resolution, signal)
     const sha256 = createHash('sha256').update(data).digest('hex')
@@ -1043,16 +1097,21 @@ export class ArkmeExtensionManager {
       )
     }
     if (resolution.extension_id !== extensionId) {
-      throw new ArkmePluginError('extension-install-contract-invalid', '扩展市场返回了错误的扩展身份', false, 502)
+      throw new ArkmePluginError('extension-install-contract-invalid', '市集返回了错误的扩展身份', false, 502)
     }
+    let result: ArkmeExtensionApplyResult
     if (bundleInstallResolution(resolution)) {
-      return await this.applyBundleV2(input, resolution as BundleInstallResolution, previous)
+      result = await this.applyBundleV2(input, resolution as BundleInstallResolution, previous)
+      void this.reportInstallationState(extensionId, true)
+      return result
     }
     const contractVersion = (resolution as { artifact_contract_version?: unknown }).artifact_contract_version
     if (contractVersion !== undefined && contractVersion !== 0) {
-      throw new ArkmePluginError('extension-install-contract-invalid', '扩展市场返回了不完整或不受支持的制品合同', false, 502)
+      throw new ArkmePluginError('extension-install-contract-invalid', '市集返回了不完整或不受支持的制品合同', false, 502)
     }
-    return await this.applyLegacyV1(input, resolution, previous)
+    result = await this.applyLegacyV1(input, resolution, previous)
+    void this.reportInstallationState(extensionId, true)
+    return result
   }
 
   private async applyLegacyV1(
@@ -1412,6 +1471,7 @@ export class ArkmeExtensionManager {
     const extensionId = requiredId(input.extensionId, 'extension_id')
     const installed = this.store.get(extensionId)
     if (installed === undefined) {
+      void this.reportInstallationState(extensionId, false)
       return { extension_id: extensionId, installed: false, active: false, restart_required: false, message: '扩展未安装' }
     }
     if (installed.dynamicPluginId !== undefined) {
@@ -1447,6 +1507,7 @@ export class ArkmeExtensionManager {
     }
     this.store.remove(extensionId)
     this.activeAgents.delete(extensionId)
+    void this.reportInstallationState(extensionId, false)
     if (installed.profilePackageName !== undefined) {
       this.pendingProfileChanges.set(extensionId, {
         extensionId,
@@ -1477,6 +1538,43 @@ export class ArkmeExtensionManager {
       active: false,
       restart_required: installed.profilePackageName !== undefined,
       message: '扩展已卸载',
+    }
+  }
+
+  private async reportOpen(extensionId: string, signal?: AbortSignal): Promise<void> {
+    const recordOpen = (this.client as Partial<ExtensionPublishClient>).recordOpen
+    if (typeof recordOpen !== 'function') return
+    try {
+      await recordOpen.call(this.client, extensionId, signal)
+    } catch {
+      // Engagement telemetry is best effort and must never hide a successfully loaded detail.
+    }
+  }
+
+  private async reportInstallationState(extensionId: string, installed: boolean, signal?: AbortSignal): Promise<void> {
+    const setInstallationState = (this.client as Partial<ExtensionPublishClient>).setInstallationState
+    if (typeof setInstallationState !== 'function') return
+    try {
+      await setInstallationState.call(this.client, {
+        extension_id: extensionId,
+        installation_id: this.installationInstanceId,
+        installed,
+      }, signal)
+    } catch {
+      // The next startup snapshot repairs missed reports without rolling back local lifecycle success.
+    }
+  }
+
+  private async syncInstallationSnapshot(): Promise<void> {
+    const syncInstallationStates = (this.client as Partial<ExtensionPublishClient>).syncInstallationStates
+    if (typeof syncInstallationStates !== 'function') return
+    try {
+      await syncInstallationStates.call(this.client, {
+        installation_id: this.installationInstanceId,
+        installed_extension_ids: this.store.list().map(item => item.extensionId),
+      })
+    } catch {
+      // Older services and temporary network failures are compatible; a later startup retries the snapshot.
     }
   }
 

@@ -1742,6 +1742,9 @@ export type ArkmePluginOperation =
   | 'extensions.enabled.set'
   | 'extensions.preview.delete'
   | 'extensions.preview.reorder'
+  | 'extensions.catalog.list'
+  | 'extensions.classification.tree'
+  | 'extensions.classification.items'
 
 export type ArkmeHostOperation = ArkmePluginOperation
   | 'provider.instance'
@@ -1774,6 +1777,8 @@ export type ArkmeHostOperation = ArkmePluginOperation
   | 'source.interwoven-moments'
   | 'source.interwoven-detail'
   | 'extensions.catalog.list'
+  | 'extensions.classification.tree'
+  | 'extensions.classification.items'
   | 'extensions.catalog.detail'
   | 'extensions.audit.check'
   | 'extensions.my-list'

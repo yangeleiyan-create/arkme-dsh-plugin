@@ -8,6 +8,8 @@ export const ARKME_EXTENSION_PREVIEW_MAX_ITEMS = 20
 export type ArkmeExtensionVisibility = 'private' | 'unlisted' | 'public'
 export type ArkmeExtensionEditableVisibility = 'private' | 'public'
 export type ArkmeExtensionChannel = 'stable' | 'beta'
+export type ArkmeExtensionCatalogSort = 'rating' | 'comments' | 'opens' | 'created_at'
+export type ArkmeExtensionClassificationStatus = 'unavailable' | 'building' | 'ready' | 'failed' | 'empty'
 
 export interface ArkmeExtensionRatingSummary {
   average: number
@@ -47,6 +49,13 @@ export interface ArkmeSharedExtensionDetail {
 	source?: ArkmeExtensionSource
 }
 
+/** Optional author projection returned by GitHub-imported marketplace entries. */
+export interface ArkmeExtensionSourceAuthor {
+  name?: string
+  avatar_url?: string
+  profile_url?: string
+}
+
 export interface ArkmeExtensionManifest {
   format: typeof ARKME_EXTENSION_FORMAT
   format_version: typeof ARKME_EXTENSION_FORMAT_VERSION
@@ -76,6 +85,9 @@ export interface ArkmeExtensionCatalogItem {
   owner_user_id?: number
   owner_name?: string
   owner_arkme_id?: string
+  owner_avatar_ref?: string
+  owner_avatar_fallback?: ArkmeExtensionReviewAvatarFallback
+  source_author?: ArkmeExtensionSourceAuthor
   visibility: ArkmeExtensionVisibility
   status?: 'active' | 'suspended' | 'deleted'
   latest_stable_version?: string
@@ -83,6 +95,11 @@ export interface ArkmeExtensionCatalogItem {
   channel?: ArkmeExtensionChannel
   manifest?: ArkmeExtensionManifest
   updated_at?: number
+  created_at?: number
+  comment_count?: number
+  open_count?: number
+  view_count?: number
+  install_user_count?: number
   installed_version?: string
   update_available?: boolean
   package_name?: string
@@ -111,6 +128,41 @@ export interface ArkmeExtensionCatalogPage {
   items: ArkmeExtensionCatalogItem[]
   total: number
   next_cursor?: string
+  capabilities?: {
+    sorts: ArkmeExtensionCatalogSort[]
+    cursor: boolean
+  }
+}
+
+export interface ArkmeExtensionClassificationCategory {
+  category_id: string
+  name: string
+  description?: string
+  extension_count: number
+  level?: number
+}
+
+export interface ArkmeExtensionClassificationTree {
+  status: ArkmeExtensionClassificationStatus
+  categories: ArkmeExtensionClassificationCategory[]
+  total_extensions: number
+  total_categories: number
+  updated_at?: number
+  message?: string
+  progress?: {
+    total: number
+    processed: number
+    percentage: number
+    stage?: string
+  }
+}
+
+export interface ArkmeExtensionClassificationPage extends ArkmeExtensionCatalogPage {
+  category_id: string
+  category_name?: string
+  status?: ArkmeExtensionClassificationStatus
+  limit: number
+  offset: number
 }
 
 export type ArkmeExtensionAuditTrigger = 'market_detail' | 'tool'
